@@ -8,7 +8,30 @@ load 'lib/solidus_taxonomy.rb'
 load 'lib/solidus_product.rb'
 include SolidusHelpers
 
+org = ARGV.shift.to_s.strip
+if org == ""
+  puts "ERROR: Please provide organization"
+  exit(1)
+end
+
 solidus_token = Util.read_key(File.expand_path(File.join(File.dirname(__FILE__), '/../keys/services/solidus.txt')))
+
+flow = FlowCommerce.instance
+
+def each_flow_item(client, org, opts={}, &block)
+  limit = opts[:limit] || 100
+  offset = opts[:offset] || 0
+  
+  items = client.items.get(org, :limit => limit, :offset => offset)
+
+  items.each do |item|
+    yield item
+  end
+
+  if items.size >= limit
+    each_flow_item(client, org, { :limit => limit, :offset => offset + limit }, &block)
+  end
+end
 
 solidus = Io::Flow::Solidus::V0::Client.at_base_url(
   :default_headers => {'X-Spree-Token' => solidus_token}
@@ -35,71 +58,48 @@ def create_product(client, st, taxonomy, name, description, categories, price)
   )
 end
 
-items = [
-  {
-    "id" => "sku-1",
-    "name" => "Test",
-    "description" => "Test description",
-    "price" => "15.19",
-    "categories" => ["Tops"],
-    "attributes" => {
-      "color" => "blue",
-      "product_id" => "5"
-    }
-  },
-
-  {
-    "id" => "sku-2",
-    "name" => "Test 2",
-    "description" => "Test 2 description",
-    "price" => "20.19",
-    "categories" => ["Tops"],
-    "attributes" => {
-      "color" => "red",
-      "product_id" => "5"
-    }
-  },
-
-  {
-    "id" => "sku-3",
-    "name" => "Test 3",
-    "description" => "Test 3 description",
-    "price" => "20.19",
-    "categories" => ["Tops"],
-    "attributes" => {
-      "color" => "red",
-      "product_id" => "5"
-    }
-  }
-]
-
-items.each do |item|
+each_flow_item(flow, org, :limit => 5) do |item|
+  puts "%s/%s" % [org, item.number]
 
   response = with_404_as_nil do
     solidus.request("/variants").with_query(
-      "q\[sku_matches\]" => item['id']
+      "q\[sku_matches\]" => item.number
     ).get
   end
   #puts response['variants'].first.inspect
-  variant = ::Io::Flow::Solidus::V0::Models::ResponseVariants.new(response).variants.find { |v| v.sku == item['id'] }
+  variant = ::Io::Flow::Solidus::V0::Models::ResponseVariants.new(response).variants.find { |v| v.sku == item.number }
 
-  if variant
-    puts "Variant sku[%s] already exists" % variant.sku
+  dims = item.dimensions.product || item.dimensions.packaging
+  if dims
+    height = dims.height.value
+    weight = dims.weight.value
+    depth = dims.depth.value
   else
-    product = create_product(solidus, st, taxonomy, item['name'], item['description'], item['categories'], to_cents(item['price']))
-    puts "Created product id[%s] name[%s]" % [product.id, product.name]
+    height = weight = depth = nil
+  end
+    
+  form = ::Io::Flow::Solidus::V0::Models::VariantForm.new(
+    :sku=> item.number,
+    :price => to_cents(item.price.amount),
+    :cost_price => to_cents(item.price.amount),
+    :is_master => true,
+    :height => height,
+    :weight => weight,
+    :depth => depth,
+    :options => item.attributes.map do |key, value|
+      ::Io::Flow::Solidus::V0::Models::Option.new(:name => key, :value => value)
+    end
+  )
 
-    form = ::Io::Flow::Solidus::V0::Models::VariantForm.new(
-      :sku=> item['id'],
-      :price => to_cents(item['price']),
-      :cost_price => to_cents(item['price']),
-      :is_master => true,
-      :options => item['attributes'].map do |key, value|
-        ::Io::Flow::Solidus::V0::Models::Option.new(:name => key, :value => value)
-      end
-    )
-
-    puts form.inspect
+  puts form.inspect
+  exit(1)
+  
+  if variant
+    ## TODO: Update once we figure out how to get product id
+    puts "  - variant sku[%s] already exists" % variant.sku
+  else
+    product = create_product(solidus, st, taxonomy, item.name, item.description, item.categories, to_cents(item.price.amount))
+    puts "  - created product id[%s] name[%s]" % [product.id, product.name]
 
     variant = solidus.products.post_variants_by_product_slug(
       product.slug,
@@ -108,7 +108,7 @@ items.each do |item|
       )
     )
 
-    puts "Created variant %s" % variant.inspect
+    puts "  - created variant sku[%s]" % variant.sku
   end
 end
 
