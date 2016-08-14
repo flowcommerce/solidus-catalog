@@ -1,0 +1,6 @@
+code:
+  flow:
+    solidus:
+      version: latest
+      generators:
+        ruby_client: lib
